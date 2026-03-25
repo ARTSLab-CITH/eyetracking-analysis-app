@@ -16,7 +16,7 @@ VIVE Spectator Camera does not allow recording passthrough so it is unused curre
 To run:
 ```python
 python run.py
-``
+```
 
 To build:
 `python build.py` or VSCode `Run Task > Build GazeAnalyzer executable`
