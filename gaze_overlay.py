@@ -233,6 +233,24 @@ def process_video(video_path, csv_path, output_path, fov=60):
         timestamps = df['RelativeTime'].to_numpy()
     else:
         timestamps = np.zeros(len(df))
+        
+    print("Auto-detecting visual sync ('Curtain Drop')...")
+    first_valid_frame = 0
+    test_frame_idx = 0
+    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    while True:
+        ret, tmp_frame = cap.read()
+        if not ret:
+            break
+        # Calculate mean luminance. Black frames will be very low (close to 0).
+        mean_lumi = tmp_frame.mean()
+        if mean_lumi > 15.0: # threshold to consider non-black
+            first_valid_frame = test_frame_idx
+            break
+        test_frame_idx += 1
+    
+    print(f"Visual sync detected at frame {first_valid_frame} ({first_valid_frame/fps:.2f}s)")
+    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
     current_frame = 0
 
@@ -241,63 +259,65 @@ def process_video(video_path, csv_path, output_path, fov=60):
         if not ret:
             break
 
-        video_time = current_frame / fps
+        video_time = (current_frame - first_valid_frame) / fps
 
-        # Find CSV row closest to current video time
-        idx = int(np.abs(timestamps - video_time).argmin())
-        row = df.iloc[idx]
+        # Only overlay data if we've passed the sync frame
+        if video_time >= 0:
+            # Find CSV row closest to current video time
+            idx = int(np.abs(timestamps - video_time).argmin())
+            row = df.iloc[idx]
 
-        time_delta = abs(row['RelativeTime'] - video_time)
-        if time_delta <= 0.5:
-            left_valid = int(row['L_IsValid']) == 1
-            right_valid = int(row['R_IsValid']) == 1
+            time_delta = abs(row['RelativeTime'] - video_time)
+            if time_delta <= 0.5:
+                left_valid = int(row['L_IsValid']) == 1
+                right_valid = int(row['R_IsValid']) == 1
 
-            # Use left eye primary, right eye as fallback
-            if left_valid or right_valid:
-                eye_prefix = 'L_' if left_valid else 'R_'
+                # Use left eye primary, right eye as fallback
+                if left_valid or right_valid:
+                    eye_prefix = 'L_' if left_valid else 'R_'
 
-                hmd_pos = np.array([row['HmdPosX'], row['HmdPosY'], row['HmdPosZ']])
-                hmd_rot = np.array([row['HmdRotX'], row['HmdRotY'], row['HmdRotZ'], row['HmdRotW']])
+                    hmd_pos = np.array([row['HmdPosX'], row['HmdPosY'], row['HmdPosZ']])
+                    hmd_rot = np.array([row['HmdRotX'], row['HmdRotY'], row['HmdRotZ'], row['HmdRotW']])
 
-                # Backward compatibility: Check if WorldPos is exported
-                world_pos_key = f'{eye_prefix}WorldPosX'
-                if world_pos_key in row:
-                    gaze_origin = np.array([
-                        row[f'{eye_prefix}WorldPosX'],
-                        row[f'{eye_prefix}WorldPosY'],
-                        row[f'{eye_prefix}WorldPosZ'],
+                    # Backward compatibility: Check if WorldPos is exported
+                    world_pos_key = f'{eye_prefix}WorldPosX'
+                    if world_pos_key in row:
+                        gaze_origin = np.array([
+                            row[f'{eye_prefix}WorldPosX'],
+                            row[f'{eye_prefix}WorldPosY'],
+                            row[f'{eye_prefix}WorldPosZ'],
+                        ])
+                    else:
+                        gaze_local_pos = np.array([
+                            row[f'{eye_prefix}LocalPosX'],
+                            row[f'{eye_prefix}LocalPosY'],
+                            row[f'{eye_prefix}LocalPosZ'],
+                        ])
+                        # World-space gaze origin = HMD_pos + HMD_rot * local_gaze_pos
+                        gaze_origin = hmd_pos + q_mult_v(hmd_rot, gaze_local_pos)
+
+                    gaze_dir_world = np.array([
+                        row[f'{eye_prefix}WorldDirX'],
+                        row[f'{eye_prefix}WorldDirY'],
+                        row[f'{eye_prefix}WorldDirZ'],
                     ])
-                else:
-                    gaze_local_pos = np.array([
-                        row[f'{eye_prefix}LocalPosX'],
-                        row[f'{eye_prefix}LocalPosY'],
-                        row[f'{eye_prefix}LocalPosZ'],
-                    ])
-                    # World-space gaze origin = HMD_pos + HMD_rot * local_gaze_pos
-                    gaze_origin = hmd_pos + q_mult_v(hmd_rot, gaze_local_pos)
 
-                gaze_dir_world = np.array([
-                    row[f'{eye_prefix}WorldDirX'],
-                    row[f'{eye_prefix}WorldDirY'],
-                    row[f'{eye_prefix}WorldDirZ'],
-                ])
+                    cam_pos = np.array([row['CamPosX'], row['CamPosY'], row['CamPosZ']])
+                    cam_rot = np.array([row['CamRotX'], row['CamRotY'], row['CamRotZ'], row['CamRotW']])
 
-                cam_pos = np.array([row['CamPosX'], row['CamPosY'], row['CamPosZ']])
-                cam_rot = np.array([row['CamRotX'], row['CamRotY'], row['CamRotZ'], row['CamRotW']])
+                    screen_point = unity_to_cv_projection(
+                        gaze_origin, gaze_dir_world, cam_pos, cam_rot, fov, width, height
+                    )
 
-                screen_point = unity_to_cv_projection(
-                    gaze_origin, gaze_dir_world, cam_pos, cam_rot, fov, width, height
-                )
+                    if screen_point:
+                        cv2.circle(frame, screen_point, 15, (0, 0, 255), 2)   # red ring
+                        cv2.circle(frame, screen_point, 3,  (0, 255, 0), -1)  # green center
 
-                if screen_point:
-                    cv2.circle(frame, screen_point, 15, (0, 0, 255), 2)   # red ring
-                    cv2.circle(frame, screen_point, 3,  (0, 255, 0), -1)  # green center
-
-                    roi_text = str(row['FocusedROI'])
-                    if roi_text and roi_text != 'nan':
-                        cv2.putText(frame, roi_text,
-                                    (screen_point[0] + 20, screen_point[1]),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                        roi_text = str(row['FocusedROI'])
+                        if roi_text and roi_text != 'nan':
+                            cv2.putText(frame, roi_text,
+                                        (screen_point[0] + 20, screen_point[1]),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
         out.write(frame)
         current_frame += 1

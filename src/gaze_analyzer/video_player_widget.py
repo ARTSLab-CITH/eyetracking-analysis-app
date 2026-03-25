@@ -108,6 +108,32 @@ class VideoPlayerWidget(QWidget):
         
         self.precomputed_frames = []
         if self.csv_data is not None and not self.csv_data.empty:
+            sync_progress = QProgressDialog("Detecting visual sync (Curtain Drop)...", "Cancel", 0, self.total_frames, self)
+            sync_progress.setWindowModality(Qt.WindowModal)
+            sync_progress.setMinimumDuration(0)
+            sync_progress.show()
+
+            first_valid_frame = 0
+            for i in range(self.total_frames):
+                if sync_progress.wasCanceled():
+                    break
+                ret, frame = self.cap.read()
+                if not ret:
+                    break
+                
+                if frame.mean() > 15.0:
+                    first_valid_frame = i
+                    break
+                
+                if i % 30 == 0:
+                    sync_progress.setValue(i)
+                    QApplication.instance().processEvents()
+                    
+            sync_progress.setValue(self.total_frames)
+            
+            # Reset video to frame 0
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+
             progress = QProgressDialog("Pre-computing sync data...", "Cancel", 0, self.total_frames, self)
             progress.setWindowModality(Qt.WindowModal)
             progress.setMinimumDuration(0)
@@ -116,8 +142,14 @@ class VideoPlayerWidget(QWidget):
             for i in range(self.total_frames):
                 if progress.wasCanceled():
                     break
-                target_time = i / self.fps
+                target_time = (i - first_valid_frame) / self.fps
                 row_dict = get_interpolated_frame(self.csv_data, target_time)
+                
+                if target_time < 0:
+                    row_dict['L_IsValid'] = 0
+                    row_dict['R_IsValid'] = 0
+                    row_dict['IsValid'] = 0
+                    
                 self.precomputed_frames.append(row_dict)
                 
                 if i % 30 == 0:
