@@ -1,0 +1,111 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!1 &2405828802238508241
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 9103616466308857758}
+  - component: {fileID: 6178653706314195535}
+  - component: {fileID: 6170932036442374524}
+  - component: {fileID: 3995498984268104919}
+  - component: {fileID: 8122710838595856178}
+  m_Layer: 0
+  m_Name: EyeTracking
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!4 &9103616466308857758
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 2405828802238508241}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 6.87658, y: -0.40517402, z: -7.7920547}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &6178653706314195535
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 2405828802238508241}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: a2dcb794e00bcfe4893bd5bf06ffeb98, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+--- !u!114 &6170932036442374524
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 2405828802238508241}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: f4cbd7a756cd1e044bf2b2c45bf0a3a8, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+--- !u!114 &3995498984268104919
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 2405828802238508241}
+  m_Enabled: 0
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: fda46617f9e447e47863938d3006d5bd, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  cameraSourceRef: 0
+  layerMask:
+    serializedVersion: 2
+    m_Bits: 4294967295
+  <IsSmoothCameraMovement>k__BackingField: 0
+  <SmoothCameraMovementSpeed>k__BackingField: 10
+  isFrustumShowed: 0
+  verticalFov: 60
+  <PanoramaResolution>k__BackingField: 2048
+  <PanoramaOutputFormat>k__BackingField: 0
+  <PanoramaOutputType>k__BackingField: 1
+  frustumLineCount: 4
+  frustumCenterLineCount: 1
+  frustumLineWidth: 0.02
+  frustumCenterLineWidth: 0.01
+  frustumLineColor: {r: 1, g: 1, b: 1, a: 1}
+  frustumCenterLineColor: {r: 1, g: 1, b: 1, a: 1}
+  <SpectatorCameraPrefab>k__BackingField: {fileID: 0}
+  followSpectatorCameraTracker: {fileID: 0}
+  spectatorCameraViewMaterial: {fileID: 2100000, guid: a5da394ff4b85024ba3bed441b18c7e2, type: 2}
+  <IsShowHmdPart>k__BackingField: 1
+  <IsShowTrackerPart>k__BackingField: 0
+  <IsRequireLoadJsonFile>k__BackingField: 0
+--- !u!114 &8122710838595856178
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 2405828802238508241}
+  m_Enabled: 0
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 47a6afbbc5e705041b2851122f306f76, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  spectatorCameraViewMaterial: {fileID: 0}
+  isRecording: 0
+  isDebugSpectatorCamera: 0

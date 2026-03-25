@@ -3,3 +3,8 @@ __pycache__/
 gaze_analysis.db
 src/gaze_analyzer/Imports/*.mp4
 src/gaze_analyzer/Imports/*.csv
+build/
+dist/
+*.exe
+*.spec
+*.meta

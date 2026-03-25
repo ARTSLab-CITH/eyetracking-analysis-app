@@ -1,0 +1,21 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Build GazeAnalyzer executable",
+			"type": "shell",
+			"command": "${command:python.interpreterPath}",
+			"args": [
+				"build.py"
+			],
+			"isBackground": false,
+			"problemMatcher": [
+				"$pylint"
+			],
+			"group": {
+				"kind": "build",
+				"isDefault": true
+			}
+		}
+	]
+}
