@@ -3,6 +3,14 @@ Companion analysis app for the Vive Focus Vision 3 headset eyetracking in Unity 
 
 Accompanying Unity code can be found at [ARTSLab-CITH/Unity-XR-Modules](https://github.com/ARTSLab-CITH/Unity-XR-Modules/tree/main/EyeTracker)
 
+## Major Issues with Projection of Gaze Position
+- Spectator camera does not allow recording of passthrough (VIVE Internal).
+- VIVE screen recording is different than app view and only from a single eye, not centered on eyes.
+- FieldOfView is different in recording and app
+- Projection depth (which 2D point is dependent on) has to be approximated using stereoscopic vergence
+- VIVE Eye Tracking API & Unity `WorldToScreenPoint` are not behaving reliably in tests
+- 
+
 ## Release Information
 `eyetracker.apk` (Basic passthrough with eyetracking APK for the Vive Focus Vision 3 headset)
 `GazeAnalyzer.exe` (Pre-built exe of Python app)

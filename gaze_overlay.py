@@ -3,349 +3,257 @@ import pandas as pd
 import numpy as np
 import argparse
 import sys
+import math
 import os
-import subprocess
-import shutil
-import datetime
+from pathlib import Path
 
-# Device paths on VIVE Focus Vision (Android filesystem)
-DEVICE_VIDEO_DIR = "/sdcard/Movies/Screenrecorder/"
-DEVICE_CSV_DIR = "/sdcard/Android/data/com.artslab.eyetracking/files/"
-VIDEO_PREFIX = "Screenrecord"
-CSV_PREFIX = "EyeData"
+# Add src to path so we can import gaze_analyzer
+sys.path.insert(0, os.path.join(str(Path(__file__).resolve().parent), "src"))
 
-ADB_SDK_PATH = os.path.join(
-    os.path.expanduser("~"), "AppData", "Local", "Android", "Sdk", "platform-tools", "adb.exe"
-)
+class GazeProjector:
+    def __init__(self, fov_v_deg, aspect_ratio, width, height):
+        self.fov_v_deg = fov_v_deg
+        self.aspect_ratio = aspect_ratio
+        self.width = width
+        self.height = height
+        self.tan_half_fov_v = math.tan(math.radians(fov_v_deg / 2.0))
+        self.tan_half_fov_h = self.tan_half_fov_v * aspect_ratio
 
+    def project(self, l_pos, l_dir, r_pos, r_dir):
+        # Unity is LHS: +Z Forward, +Y Up. 
+        # Convert to numpy arrays
+        o1 = np.array(l_pos, dtype=float)
+        d1 = np.array(l_dir, dtype=float)
+        o2 = np.array(r_pos, dtype=float)
+        d2 = np.array(r_dir, dtype=float)
+        
+        # Calculate stereoscopic vergence (closest intersection of two rays)
+        w0 = o1 - o2
+        a = np.dot(d1, d1)
+        b = np.dot(d1, d2)
+        c = np.dot(d2, d2)
+        d = np.dot(d1, w0)
+        e = np.dot(d2, w0)
+        denom = a * c - b * b
+        
+        if denom < 1e-6:
+            # Rays are practically parallel; vergence is effectively at infinity.
+            # Using left eye ray at depth 10.0m as fallback
+            focus_point = o1 + d1 * 10.0
+            distance = 10.0
+            s_c, t_c = 10.0, 10.0
+            fallback = True
+        else:
+            fallback = False
+            s_c = (b * e - c * d) / denom
+            t_c = (a * e - b * d) / denom
+            
+            # If the intersection is behind the local position (diverging)
+            if s_c < 0 or t_c < 0:
+                s_c = max(s_c, 0.1)
+                t_c = max(t_c, 0.1)
+                fallback = True
+                
+            p1 = o1 + s_c * d1
+            p2 = o2 + t_c * d2
+            focus_point = (p1 + p2) / 2.0
+            distance = (s_c + t_c) / 2.0
 
-def _find_adb(adb_path_override=None):
-    """Locate the adb executable. Checks: explicit override, PATH, then Android SDK default."""
-    if adb_path_override:
-        if os.path.isfile(adb_path_override):
-            return adb_path_override
-        print(f"[Import] Specified adb path not found: {adb_path_override}")
-        sys.exit(1)
+        if focus_point[2] <= 0: # looking behind the camera
+            return np.nan, np.nan, None
 
-    # Check PATH
-    found = shutil.which("adb")
-    if found:
-        return found
+        # Project the 3D focus point onto the near plane
+        x_hit = focus_point[0] / focus_point[2]
+        y_hit = focus_point[1] / focus_point[2]
+        
+        # NDC (-1 to 1)
+        ndc_x = x_hit / self.tan_half_fov_h
+        ndc_y = y_hit / self.tan_half_fov_v
+        
+        # Pixel coordinates
+        px = self.width / 2 * (1.0 + ndc_x)
+        py = self.height / 2 * (1.0 - ndc_y) # Unity +Y is up, so +ndc_y is top of screen
+        
+        debug_info = {
+            'l_pos': o1,
+            'r_pos': o2,
+            'l_dir': d1,
+            'r_dir': d2,
+            's_c': s_c,
+            't_c': t_c,
+            'fallback': fallback,
+            'focus_point': focus_point,
+            'distance': distance,
+            'x_hit': x_hit,
+            'y_hit': y_hit,
+            'ndc_x': ndc_x,
+            'ndc_y': ndc_y,
+            'fov_v': self.fov_v_deg,
+            'aspect_ratio': self.aspect_ratio,
+            'tan_h': self.tan_half_fov_h,
+            'tan_v': self.tan_half_fov_v
+        }
+        
+        return px, py, debug_info
 
-    # Check default Android SDK location
-    if os.path.isfile(ADB_SDK_PATH):
-        return ADB_SDK_PATH
+def parse_metadata(filepath):
+    fov = 98.4044418
+    aspect_ratio = 2.0
+    with open(filepath, 'r') as f:
+        for line in f:
+            if not line.startswith('#'):
+                break
+            if 'FOV:' in line:
+                try:
+                    fov = float(line.split('FOV:')[1].strip())
+                except ValueError:
+                    pass
+            elif 'AspectRatio:' in line:
+                try:
+                    aspect_ratio = float(line.split('AspectRatio:')[1].strip())
+                except ValueError:
+                    pass
+    return fov, aspect_ratio
 
-    print("[Import] adb not found. Install the Android SDK platform-tools or pass --adb-path.")
-    print(f"[Import] Expected location: {ADB_SDK_PATH}")
-    sys.exit(1)
+def main():
+    parser = argparse.ArgumentParser(description="Overlay gaze onto video.")
+    parser.add_argument("video", nargs="?", help="Path to input video (optional)")
+    parser.add_argument("csv", nargs="?", help="Path to input CSV (optional)")
+    parser.add_argument("--output", default="output_gaze.mp4", help="Path to output video")
+    parser.add_argument("--fov", type=float, help="FOV override")
+    args = parser.parse_args()
 
+    video_path = args.video
+    csv_path = args.csv
 
-def _run_adb(adb, *args):
-    """Run an adb command and return stdout. Exits on failure."""
-    cmd = [adb] + list(args)
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        print(f"[Import] adb command failed: {' '.join(cmd)}")
-        print(f"[Import] stderr: {result.stderr.strip()}")
-        sys.exit(1)
-    return result.stdout
+    if not video_path or not csv_path:
+        print("Video or CSV not provided. Attempting to pull latest from connected device...")
+        from gaze_analyzer.core.import_service import pull_latest_data
+        imports_dir = os.path.join(Path(__file__).resolve().parent, "src", "gaze_analyzer", "Imports")
+        try:
+            video_path, csv_path = pull_latest_data(imports_dir)
+        except Exception as e:
+            print(f"Failed to pull from device: {e}")
+            sys.exit(1)
 
+    fov, aspect_ratio_csv = parse_metadata(csv_path)
+    if args.fov is not None:
+        fov = args.fov
 
-def _find_most_recent(adb, directory, prefix, extension):
-    """List files on device sorted by modification time and return the most recent match."""
-    output = _run_adb(adb, "shell", f"ls -t {directory}")
-    for line in output.strip().splitlines():
-        name = line.strip()
-        if name.startswith(prefix) and name.endswith(extension):
-            return name
-    return None
-
-
-def _get_device_mtime(adb, path):
-    """Return the modification time of a file on the device as a datetime (device local time)."""
-    output = _run_adb(adb, "shell", f"stat -c \"%Y\" {path}")
-    epoch = int(output.strip())
-    return datetime.datetime.fromtimestamp(epoch)
-
-
-def _print_file_info(label, name, mtime):
-    """Print file timestamp and warn if older than 15 minutes."""
-    age = datetime.datetime.now() - mtime
-    age_mins = age.total_seconds() / 60
-    timestamp_str = mtime.strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[Import] {label}: {name}")
-    print(f"[Import]   Modified: {timestamp_str} ({age_mins:.1f} min ago)")
-    if age_mins > 15:
-        print(f"[Import]   WARNING: This file is {age_mins:.0f} minutes old — is this the correct recording?")
-
-
-def import_from_device(imports_dir, adb_path_override=None):
-    """
-    Pull the most recent screen recording (MP4) and eye-tracking CSV from a
-    connected VIVE Focus Vision headset into the local Imports directory.
-
-    Returns:
-        tuple: (mp4_local_path, csv_local_path)
-    """
-    adb = _find_adb(adb_path_override)
-    print(f"[Import] Using adb: {adb}")
-
-    # Verify device is connected
-    devices_output = _run_adb(adb, "devices")
-    connected = [l for l in devices_output.strip().splitlines()[1:] if "device" in l]
-    if not connected:
-        print("[Import] No device connected. Ensure USB debugging is enabled and the headset is plugged in.")
-        sys.exit(1)
-    print(f"[Import] Device found: {connected[0].split()[0]}")
-
-    os.makedirs(imports_dir, exist_ok=True)
-
-    # --- Find most recent MP4 ---
-    video_name = _find_most_recent(adb, DEVICE_VIDEO_DIR, VIDEO_PREFIX, ".mp4")
-    if not video_name:
-        print(f"[Import] No files matching '{VIDEO_PREFIX}*.mp4' found in {DEVICE_VIDEO_DIR}")
-        sys.exit(1)
-    video_mtime = _get_device_mtime(adb, DEVICE_VIDEO_DIR + video_name)
-    _print_file_info("Video", video_name, video_mtime)
-
-    # --- Find most recent CSV ---
-    csv_name = _find_most_recent(adb, DEVICE_CSV_DIR, CSV_PREFIX, ".csv")
-    if not csv_name:
-        print(f"[Import] No files matching '{CSV_PREFIX}*.csv' found in {DEVICE_CSV_DIR}")
-        sys.exit(1)
-    csv_mtime = _get_device_mtime(adb, DEVICE_CSV_DIR + csv_name)
-    _print_file_info("CSV  ", csv_name, csv_mtime)
-
-    # --- Pull files ---
-    mp4_local = os.path.join(imports_dir, video_name)
-    csv_local = os.path.join(imports_dir, csv_name)
-
-    print(f"[Import] Pulling {video_name}...")
-    _run_adb(adb, "pull", DEVICE_VIDEO_DIR + video_name, mp4_local)
-
-    print(f"[Import] Pulling {csv_name}...")
-    _run_adb(adb, "pull", DEVICE_CSV_DIR + csv_name, csv_local)
-
-    print(f"[Import] Files saved to {imports_dir}")
-    return mp4_local, csv_local
-
-
-def load_data(csv_path):
-    print(f"Loading CSV data from {csv_path}...")
-    try:
-        df = pd.read_csv(csv_path)
-        return df
-    except Exception as e:
-        print(f"Error loading CSV: {e}")
-        return None
-
-def q_mult_v(q, v):
-    """
-    Unity-equivalent Quaternion * Vector3 multiplication.
-    q: [x, y, z, w]
-    v: [x, y, z]
-    """
-    x, y, z, w = q[0], q[1], q[2], q[3]
-    vx, vy, vz = v[0], v[1], v[2]
-    num = x * 2.0
-    num2 = y * 2.0
-    num3 = z * 2.0
-    num4 = x * num
-    num5 = y * num2
-    num6 = z * num3
-    num7 = x * num2
-    num8 = x * num3
-    num9 = y * num3
-    num10 = w * num
-    num11 = w * num2
-    num12 = w * num3
-
-    rx = (1.0 - (num5 + num6)) * vx + (num7 - num12) * vy + (num8 + num11) * vz
-    ry = (num7 + num12) * vx + (1.0 - (num4 + num6)) * vy + (num9 - num10) * vz
-    rz = (num8 - num11) * vx + (num9 + num10) * vy + (1.0 - (num4 + num5)) * vz
-    return np.array([rx, ry, rz])
-
-def q_inv(q):
-    """Unity-equivalent Quaternion.Inverse"""
-    return np.array([-q[0], -q[1], -q[2], q[3]])
-
-def unity_to_cv_projection(gaze_origin, gaze_dir_world, cam_pos, cam_rot_quat, fov, width, height):
-    """
-    Project a world-space gaze ray onto the 2D image plane of the spectator camera.
-
-    Args:
-        gaze_origin: np.array [x, y, z] — world-space origin of the gaze ray
-        gaze_dir_world: np.array [x, y, z] — pre-computed world-space unit direction
-        cam_pos: np.array [x, y, z] — spectator camera world position
-        cam_rot_quat: np.array [x, y, z, w] — spectator camera world rotation
-        fov: vertical field of view in degrees
-        width, height: image dimensions in pixels
-
-    Returns:
-        tuple (x, y) in pixel coordinates, or None if behind camera
-    """
-    # Target point at arbitrary depth along gaze ray
-    target_pos = gaze_origin + gaze_dir_world * 10.0
-
-    # Transform target into camera-local space: P_local = R_cam_inv * (P_world - P_cam)
-    local_pos = q_mult_v(q_inv(cam_rot_quat), target_pos - cam_pos)
-
-    # local_pos uses Unity camera-space convention: +X right, +Y up, +Z forward
-    if local_pos[2] <= 0:
-        return None
-
-    fov_rad = np.deg2rad(fov)
-    half_h = local_pos[2] * np.tan(fov_rad / 2.0)
-    half_w = half_h * (width / height)
-
-    # Unity viewport: (0,0) = bottom-left; OpenCV: (0,0) = top-left
-    viewport_x = (local_pos[0] / (half_w * 2.0)) + 0.5
-    viewport_y = (local_pos[1] / (half_h * 2.0)) + 0.5
-    pixel_x = int(viewport_x * width)
-    pixel_y = int((1.0 - viewport_y) * height)
-
-    return (pixel_x, pixel_y)
-
-def process_video(video_path, csv_path, output_path, fov=60):
-    df = load_data(csv_path)
-    if df is None:
-        return
-
+    df = pd.read_csv(csv_path, comment='#')
+    
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        print(f"Error opening video: {video_path}")
-        return
+        print(f"Error opening video file {video_path}")
+        sys.exit(1)
 
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps = cap.get(cv2.CAP_PROP_FPS)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    if fps == 0 or np.isnan(fps):
+        fps = 30.0
 
-    print(f"Video: {width}x{height} @ {fps}fps, {total_frames} frames")
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(args.output, fourcc, fps, (width, height))
 
-    fourcc = cv2.VideoWriter.fourcc(*'mp4v')
-    out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+    aspect_ratio_video = width / float(height) if height else aspect_ratio_csv
+    projector = GazeProjector(fov, aspect_ratio_video, width, height)
 
-    # Support both 0-based timestamps and old absolute timestamps
-    if 'Timestamp' in df.columns:
-        df['RelativeTime'] = df['Timestamp'] - df['Timestamp'].iloc[0]
-        timestamps = df['RelativeTime'].to_numpy()
-    else:
-        timestamps = np.zeros(len(df))
-        
-    print("Auto-detecting visual sync ('Curtain Drop')...")
-    first_valid_frame = 0
-    test_frame_idx = 0
-    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    frame_index = 0
+    sync_frame_idx = -1
+    sync_threshold = 20.0 # Average brightness threshold to detect black screen removal
+
     while True:
-        ret, tmp_frame = cap.read()
-        if not ret:
-            break
-        # Calculate mean luminance. Black frames will be very low (close to 0).
-        mean_lumi = tmp_frame.mean()
-        if mean_lumi > 15.0: # threshold to consider non-black
-            first_valid_frame = test_frame_idx
-            break
-        test_frame_idx += 1
-    
-    print(f"Visual sync detected at frame {first_valid_frame} ({first_valid_frame/fps:.2f}s)")
-    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-
-    current_frame = 0
-
-    while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
             break
 
-        video_time = (current_frame - first_valid_frame) / fps
+        if sync_frame_idx == -1:
+            if np.mean(frame) > sync_threshold:
+                sync_frame_idx = frame_index
+                print(f"Sync frame found at index {sync_frame_idx} (approx {sync_frame_idx / fps:.2f}s)")
 
-        # Only overlay data if we've passed the sync frame
-        if video_time >= 0:
-            # Find CSV row closest to current video time
-            idx = int(np.abs(timestamps - video_time).argmin())
-            row = df.iloc[idx]
+        if sync_frame_idx != -1 and frame_index >= sync_frame_idx:
+            # Eye tracking time 0 starts exactly when the screen brightens
+            video_time_ms = (frame_index - sync_frame_idx) * 1000.0 / fps
 
-            time_delta = abs(row['RelativeTime'] - video_time)
-            if time_delta <= 0.5:
-                left_valid = int(row['L_IsValid']) == 1
-                right_valid = int(row['R_IsValid']) == 1
+            # Find closest row based on timestamp
+            closest_idx = (df['Timestamp'] - video_time_ms).abs().idxmin()
+            
+            # Avoid freezing the last gaze point forever if the video is much longer than the data
+            if abs(df.loc[closest_idx, 'Timestamp'] - video_time_ms) < 500: # within 500ms
+                row = df.loc[closest_idx]
 
-                # Use left eye primary, right eye as fallback
-                if left_valid or right_valid:
-                    eye_prefix = 'L_' if left_valid else 'R_'
+                cam_rot = [row['CamRotX'], row['CamRotY'], row['CamRotZ'], row['CamRotW']]
+                l_pos = [row['L_LocalPosX'], row['L_LocalPosY'], row['L_LocalPosZ']]
+                l_dir = [row['L_LocalDirX'], row['L_LocalDirY'], row['L_LocalDirZ']] 
+                r_pos = [row['R_LocalPosX'], row['R_LocalPosY'], row['R_LocalPosZ']]
+                r_dir = [row['R_LocalDirX'], row['R_LocalDirY'], row['R_LocalDirZ']]
 
-                    hmd_pos = np.array([row['HmdPosX'], row['HmdPosY'], row['HmdPosZ']])
-                    hmd_rot = np.array([row['HmdRotX'], row['HmdRotY'], row['HmdRotZ'], row['HmdRotW']])
+                px, py, debug_info = projector.project(l_pos, l_dir, r_pos, r_dir)
 
-                    # Backward compatibility: Check if WorldPos is exported
-                    world_pos_key = f'{eye_prefix}WorldPosX'
-                    if world_pos_key in row:
-                        gaze_origin = np.array([
-                            row[f'{eye_prefix}WorldPosX'],
-                            row[f'{eye_prefix}WorldPosY'],
-                            row[f'{eye_prefix}WorldPosZ'],
-                        ])
-                    else:
-                        gaze_local_pos = np.array([
-                            row[f'{eye_prefix}LocalPosX'],
-                            row[f'{eye_prefix}LocalPosY'],
-                            row[f'{eye_prefix}LocalPosZ'],
-                        ])
-                        # World-space gaze origin = HMD_pos + HMD_rot * local_gaze_pos
-                        gaze_origin = hmd_pos + q_mult_v(hmd_rot, gaze_local_pos)
+                # Unity Screen Position (average of L and R)
+                # Unity's WorldToScreenPoint typically returns (0,0) at bottom-left and (width, height) at top-right.
+                # Assuming Unity used 1920x960 (Aspect 2.0). We will normalize and rescale.
+                unity_w = 1920.0
+                unity_h = 960.0
+                
+                # Check if the ScreenPos columns exist
+                has_screen_pos = 'L_ScreenPosX' in row and 'L_ScreenPosY' in row and 'R_ScreenPosX' in row and 'R_ScreenPosY' in row
+                unity_px, unity_py = np.nan, np.nan
+                if has_screen_pos:
+                    avg_screen_x = (row['L_ScreenPosX'] + row['R_ScreenPosX']) / 2.0
+                    avg_screen_y = (row['L_ScreenPosY'] + row['R_ScreenPosY']) / 2.0
+                    
+                    # Normalize (0 to 1)
+                    norm_x = avg_screen_x / unity_w
+                    norm_y = avg_screen_y / unity_h
+                    
+                    # Rescale to video resolution and invert Y (Unity bottom-left, OpenCV top-left)
+                    unity_px = norm_x * width
+                    unity_py = (1.0 - norm_y) * height
 
-                    gaze_dir_world = np.array([
-                        row[f'{eye_prefix}WorldDirX'],
-                        row[f'{eye_prefix}WorldDirY'],
-                        row[f'{eye_prefix}WorldDirZ'],
-                    ])
+                if not np.isnan(px) and not np.isnan(py):
+                    # filled red dot (BGR in OpenCV) for our calculated projection
+                    cv2.circle(frame, (int(px), int(py)), 10, (0, 0, 255), -1)
+                    
+                if not np.isnan(unity_px) and not np.isnan(unity_py):
+                    # filled green dot (BGR) for Unity's exported screen position
+                    cv2.circle(frame, (int(unity_px), int(unity_py)), 8, (0, 255, 0), -1)
 
-                    cam_pos = np.array([row['CamPosX'], row['CamPosY'], row['CamPosZ']])
-                    cam_rot = np.array([row['CamRotX'], row['CamRotY'], row['CamRotZ'], row['CamRotW']])
-
-                    screen_point = unity_to_cv_projection(
-                        gaze_origin, gaze_dir_world, cam_pos, cam_rot, fov, width, height
-                    )
-
-                    if screen_point:
-                        cv2.circle(frame, screen_point, 15, (0, 0, 255), 2)   # red ring
-                        cv2.circle(frame, screen_point, 3,  (0, 255, 0), -1)  # green center
-
-                        roi_text = str(row['FocusedROI'])
-                        if roi_text and roi_text != 'nan':
-                            cv2.putText(frame, roi_text,
-                                        (screen_point[0] + 20, screen_point[1]),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                if debug_info:
+                    font = cv2.FONT_HERSHEY_SIMPLEX
+                    scale = 0.6
+                    color = (0, 255, 0)
+                    thickness = 2
+                    
+                    y_pos = 30
+                    fallback_str = " (FALLBACK)" if debug_info['fallback'] else ""
+                    texts = [
+                        f"Time (ms): {video_time_ms:.1f}",
+                        f"L_Pos: ({debug_info['l_pos'][0]:.4f}, {debug_info['l_pos'][1]:.4f}, {debug_info['l_pos'][2]:.4f}) | R_Pos: ({debug_info['r_pos'][0]:.4f}, {debug_info['r_pos'][1]:.4f}, {debug_info['r_pos'][2]:.4f})",
+                        f"L_Dir: ({debug_info['l_dir'][0]:.4f}, {debug_info['l_dir'][1]:.4f}, {debug_info['l_dir'][2]:.4f}) | R_Dir: ({debug_info['r_dir'][0]:.4f}, {debug_info['r_dir'][1]:.4f}, {debug_info['r_dir'][2]:.4f})",
+                        f"Rays intersecting at depth s: {debug_info['s_c']:.3f}m, t: {debug_info['t_c']:.3f}m{fallback_str}",
+                        f"Focus Point: ({debug_info['focus_point'][0]:.4f}, {debug_info['focus_point'][1]:.4f}, {debug_info['focus_point'][2]:.4f})",
+                        f"Distance: {debug_info['distance']: .3f}m",
+                        f"Near Plane Hit (x_hit, y_hit): ({debug_info['x_hit']:.4f}, {debug_info['y_hit']:.4f})",
+                        f"NDC (ndc_x, ndc_y): ({debug_info['ndc_x']:.4f}, {debug_info['ndc_y']:.4f})",
+                        f"Pixels (px, py): ({px:.1f}, {py:.1f})",
+                        f"Unity Pixels (px, py): ({unity_px:.1f}, {unity_py:.1f})" if not np.isnan(unity_px) else "Unity Pixels: N/A",
+                        f"FOV_V: {debug_info['fov_v']:.2f}, AR: {debug_info['aspect_ratio']:.3f}",
+                        f"Tan Half FOV (H: {debug_info['tan_h']:.3f}, V: {debug_info['tan_v']:.3f})"
+                    ]
+                    
+                    for text in texts:
+                        cv2.putText(frame, text, (10, y_pos), font, scale, color, thickness)
+                        y_pos += 30
 
         out.write(frame)
-        current_frame += 1
-        if current_frame % 60 == 0:
-            sys.stdout.write(f"\rProcessing: {current_frame}/{total_frames} ({current_frame/total_frames*100:.1f}%)")
-            sys.stdout.flush()
+        frame_index += 1
 
     cap.release()
     out.release()
-    print("\nProcessing complete. Saved to", output_path)
+    print("Done. Output saved to", args.output)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Overlay Gaze Data on Video')
-    parser.add_argument('video', nargs='?', help='Path to input video file')
-    parser.add_argument('csv', nargs='?', help='Path to EyeData CSV file')
-    parser.add_argument('--output', help='Path to output video file', default='output_gaze.mp4')
-    parser.add_argument('--fov', type=float, help='Camera Field of View', default=60.0)
-    parser.add_argument('--import-device', action='store_true',
-                        help='Import the most recent MP4 and CSV from a connected VIVE Focus Vision')
-    parser.add_argument('--adb-path', help='Path to adb executable (auto-detected if omitted)')
-
-    args = parser.parse_args()
-
-    if args.import_device:
-        imports_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Imports')
-        video_path, csv_path = import_from_device(imports_dir, adb_path_override=args.adb_path)
-        process_video(video_path, csv_path, args.output, args.fov)
-    else:
-        if not args.video or not args.csv:
-            parser.error('video and csv arguments are required unless --import-device is used')
-        process_video(args.video, args.csv, args.output, args.fov)
+    main()

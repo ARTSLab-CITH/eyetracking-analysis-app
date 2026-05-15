@@ -5,9 +5,9 @@ from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QImage, QPixmap, QPainter, QColor, QPen
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QSlider, QCheckBox,
-    QSizePolicy, QToolTip, QProgressDialog, QApplication
+    QSizePolicy, QToolTip, QProgressDialog, QApplication, QComboBox, QDoubleSpinBox
 )
-from gaze_analyzer.data_processor import unity_to_cv_projection, q_mult_v, get_interpolated_frame, project_point_to_2d
+from gaze_analyzer.core.data_processor import get_interpolated_frame
 
 class VideoPlayerWidget(QWidget):
     frame_processed = Signal(np.ndarray, np.ndarray, np.ndarray) # frame, cam_pos, cam_rot
@@ -74,7 +74,6 @@ class VideoPlayerWidget(QWidget):
         self.chk_heatmap = QCheckBox("Heatmap (Spatial)")
         self.chk_heatmap.toggled.connect(self.update_frame_display)
 
-        from PySide6.QtWidgets import QComboBox
         self.cmb_heatmap_length = QComboBox()
         self.cmb_heatmap_length.addItems(["All", "1s", "3s", "5s", "10s"])
         self.cmb_heatmap_length.currentTextChanged.connect(self.update_frame_display)
@@ -85,6 +84,15 @@ class VideoPlayerWidget(QWidget):
         overlay_layout.addWidget(self.chk_heatmap)
         overlay_layout.addWidget(QLabel("Length:"))
         overlay_layout.addWidget(self.cmb_heatmap_length)
+        
+        overlay_layout.addWidget(QLabel("FOV Override:"))
+        self.spin_fov = QDoubleSpinBox()
+        self.spin_fov.setRange(10.0, 150.0)
+        self.spin_fov.setValue(60.0)
+        self.spin_fov.valueChanged.connect(self.update_frame_display)
+        self.spin_fov.setToolTip("Overrides the exported metadata FOV. Set to 60 to match standard Editor view.")
+        overlay_layout.addWidget(self.spin_fov)
+        
         overlay_layout.addStretch()
 
         layout.addLayout(overlay_layout)
@@ -161,7 +169,7 @@ class VideoPlayerWidget(QWidget):
         # Precalculate screen points for faster jumping
         vid_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         vid_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        fov = self.metadata.get('camera', {}).get('FOV', 60.0) if hasattr(self, 'metadata') else 60.0
+        fov = self.spin_fov.value()
         
         for row in self.precomputed_frames:
             left_valid = int(row.get('L_IsValid', 0)) == 1
@@ -180,8 +188,21 @@ class VideoPlayerWidget(QWidget):
                         g_org = h_pos + q_mult_v(h_rot, g_loc)
                         
                     g_dir = np.array([row[f'{eye_prefix}WorldDirX'], row[f'{eye_prefix}WorldDirY'], row[f'{eye_prefix}WorldDirZ']])
-                    c_pos = np.array([row['CamPosX'], row['CamPosY'], row['CamPosZ']])
-                    c_rot = np.array([row['CamRotX'], row['CamRotY'], row['CamRotZ'], row['CamRotW']])
+                    
+                    if eye_prefix == 'L_':
+                        if left_valid:
+                            cam_l_pos = np.array([row['L_LocalPosX'], row['L_LocalPosY'], row['L_LocalPosZ']])
+                        else:
+                            cam_l_pos = np.array([-0.0315, 0.0, 0.0])
+                    else:
+                        if right_valid:
+                            cam_l_pos = np.array([row['R_LocalPosX'], row['R_LocalPosY'], row['R_LocalPosZ']])
+                        else:
+                            # Inverse the left eye offset to get the right eye position
+                            cam_l_pos = np.array([0.0315, 0.0, 0.0])
+                            
+                    c_pos = h_pos + q_mult_v(h_rot, cam_l_pos)
+                    c_rot = h_rot # project from the corresponding eye with head rotation
                     
                     row['screen_point'] = unity_to_cv_projection(g_org, g_dir, c_pos, c_rot, fov, vid_w, vid_h)
                 except Exception:
@@ -277,10 +298,22 @@ class VideoPlayerWidget(QWidget):
                             gaze_origin = hmd_pos + q_mult_v(hmd_rot, gaze_local_pos)
                             
                         gaze_dir_world = np.array([row[f'{eye_prefix}WorldDirX'], row[f'{eye_prefix}WorldDirY'], row[f'{eye_prefix}WorldDirZ']])
-                        cam_pos = np.array([row['CamPosX'], row['CamPosY'], row['CamPosZ']])
-                        cam_rot = np.array([row['CamRotX'], row['CamRotY'], row['CamRotZ'], row['CamRotW']])
                         
-                        fov = self.metadata.get('camera', {}).get('FOV', 60.0)
+                        if eye_prefix == 'L_':
+                            if int(row.get('L_IsValid', 0)) == 1:
+                                cam_l_pos = np.array([row['L_LocalPosX'], row['L_LocalPosY'], row['L_LocalPosZ']])
+                            else:
+                                cam_l_pos = np.array([-0.0315, 0.0, 0.0])
+                        else:
+                            if int(row.get('R_IsValid', 0)) == 1:
+                                cam_l_pos = np.array([row['R_LocalPosX'], row['R_LocalPosY'], row['R_LocalPosZ']])
+                            else:
+                                cam_l_pos = np.array([0.0315, 0.0, 0.0])
+                                
+                        cam_pos = hmd_pos + q_mult_v(hmd_rot, cam_l_pos)
+                        cam_rot = hmd_rot
+                        
+                        fov = self.spin_fov.value()
                         screen_point = unity_to_cv_projection(gaze_origin, gaze_dir_world, cam_pos, cam_rot, fov, w, h)
                 except Exception as e:
                     pass # Ignore missing columns gracefully
@@ -298,8 +331,17 @@ class VideoPlayerWidget(QWidget):
                 if self.chk_roi_wireframe.isChecked() and hasattr(self, 'metadata') and 'rois' in self.metadata:
                     try:
                         for roi_id, r_data in self.metadata['rois'].items():
-                            c_pos = np.array([row['CamPosX'], row['CamPosY'], row['CamPosZ']])
-                            c_rot = np.array([row['CamRotX'], row['CamRotY'], row['CamRotZ'], row['CamRotW']])
+                            hmd_pos_roi = np.array([row['HmdPosX'], row['HmdPosY'], row['HmdPosZ']])
+                            hmd_rot_roi = np.array([row['HmdRotX'], row['HmdRotY'], row['HmdRotZ'], row['HmdRotW']])
+                            if int(row.get('L_IsValid', 0)) == 1:
+                                cam_l_pos_roi = np.array([row['L_LocalPosX'], row['L_LocalPosY'], row['L_LocalPosZ']])
+                            elif int(row.get('R_IsValid', 0)) == 1:
+                                cam_l_pos_roi = np.array([row['R_LocalPosX'], row['R_LocalPosY'], row['R_LocalPosZ']])
+                            else:
+                                cam_l_pos_roi = np.array([-0.0315, 0.0, 0.0])
+                                
+                            c_pos = hmd_pos_roi + q_mult_v(hmd_rot_roi, cam_l_pos_roi)
+                            c_rot = hmd_rot_roi
                             
                             r_pos = np.array(r_data['pos'])
                             r_rot = np.array(r_data['rot'])
@@ -311,7 +353,7 @@ class VideoPlayerWidget(QWidget):
                             ]
                             
                             proj_pts = []
-                            fov = self.metadata.get('camera', {}).get('FOV', 60.0)
+                            fov = self.spin_fov.value()
                             for v in vertices:
                                 v_world = r_pos + q_mult_v(r_rot, v)
                                 pt = project_point_to_2d(v_world, c_pos, c_rot, fov, w, h)
@@ -342,8 +384,16 @@ class VideoPlayerWidget(QWidget):
                 # Fetch current camera state for projecting historical 3D points
                 if not window_df.empty:
                     try:
-                        cam_pos = np.array([row['CamPosX'], row['CamPosY'], row['CamPosZ']])
-                        cam_rot = np.array([row['CamRotX'], row['CamRotY'], row['CamRotZ'], row['CamRotW']])
+                        hmd_pos_main = np.array([row['HmdPosX'], row['HmdPosY'], row['HmdPosZ']])
+                        hmd_rot_main = np.array([row['HmdRotX'], row['HmdRotY'], row['HmdRotZ'], row['HmdRotW']])
+                        if int(row.get('L_IsValid', 0)) == 1:
+                            cam_l_pos = np.array([row['L_LocalPosX'], row['L_LocalPosY'], row['L_LocalPosZ']])
+                        elif int(row.get('R_IsValid', 0)) == 1:
+                            cam_l_pos = np.array([row['R_LocalPosX'], row['R_LocalPosY'], row['R_LocalPosZ']])
+                        else:
+                            cam_l_pos = np.array([-0.0315, 0.0, 0.0])
+                        cam_pos = hmd_pos_main + q_mult_v(hmd_rot_main, cam_l_pos)
+                        cam_rot = hmd_rot_main
                         
                         heatmap_overlay = np.zeros_like(out_frame, dtype=np.float32)
                         
@@ -359,7 +409,7 @@ class VideoPlayerWidget(QWidget):
                                     g_org = h_pos + q_mult_v(h_rot, g_loc)
                                 
                                 g_dir = np.array([hrow['L_WorldDirX'], hrow['L_WorldDirY'], hrow['L_WorldDirZ']])
-                                fov = self.metadata.get('camera', {}).get('FOV', 60.0)
+                                fov = self.spin_fov.value()
                                 h_pt = unity_to_cv_projection(g_org, g_dir, cam_pos, cam_rot, fov, w, h)
                                 
                                 if h_pt and 0 <= h_pt[0] < w and 0 <= h_pt[1] < h:
@@ -382,9 +432,17 @@ class VideoPlayerWidget(QWidget):
                         pass
         
         try:
-            if row is not None and 'CamPosX' in row:
-                cam_pos_sig = np.array([row['CamPosX'], row['CamPosY'], row['CamPosZ']])
-                cam_rot_sig = np.array([row['CamRotX'], row['CamRotY'], row['CamRotZ'], row['CamRotW']])
+            if row is not None and 'HmdPosX' in row:
+                h_pos_sig = np.array([row['HmdPosX'], row['HmdPosY'], row['HmdPosZ']])
+                h_rot_sig = np.array([row['HmdRotX'], row['HmdRotY'], row['HmdRotZ'], row['HmdRotW']])
+                if int(row.get('L_IsValid', 0)) == 1:
+                    l_c_pos = np.array([row['L_LocalPosX'], row['L_LocalPosY'], row['L_LocalPosZ']])
+                elif int(row.get('R_IsValid', 0)) == 1:
+                    l_c_pos = np.array([row['R_LocalPosX'], row['R_LocalPosY'], row['R_LocalPosZ']])
+                else:
+                    l_c_pos = np.array([-0.0315, 0.0, 0.0])
+                cam_pos_sig = h_pos_sig + q_mult_v(h_rot_sig, l_c_pos)
+                cam_rot_sig = h_rot_sig
                 self.frame_processed.emit(out_frame, cam_pos_sig, cam_rot_sig)
         except:
             pass

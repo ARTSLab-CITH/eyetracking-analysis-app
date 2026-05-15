@@ -6,11 +6,11 @@ from PySide6.QtWidgets import (
     QFrame, QSizePolicy, QStyle, QListWidgetItem, QAbstractItemView
 )
 from PySide6.QtCore import Qt
-from gaze_analyzer.database import init_db, SessionLocal, Session
-from gaze_analyzer.import_service import ImportWorker
-from gaze_analyzer.video_player_widget import VideoPlayerWidget
-from gaze_analyzer.view_3d_widget import View3DWidget
-from gaze_analyzer.data_processor import load_session_data
+from gaze_analyzer.core.database import init_db, SessionLocal, Session
+from gaze_analyzer.core.import_service import ImportWorker
+from gaze_analyzer.ui.video_player_widget import VideoPlayerWidget
+from gaze_analyzer.ui.view_3d_widget import View3DWidget
+from gaze_analyzer.core.data_processor import load_session_data
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -94,7 +94,7 @@ class MainWindow(QMainWindow):
         # --- Status Bar ---
         self.statusBar().showMessage("Ready. Initialize a session by importing from a VIVE headset or selecting files manually.")
         
-        self.imports_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Imports")
+        self.imports_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "Imports")
         os.makedirs(self.imports_dir, exist_ok=True)
         
         self.import_worker = None
